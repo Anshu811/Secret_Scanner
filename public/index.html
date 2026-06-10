@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Secret Scanner — Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ══ LOGIN PAGE ══════════════════════════════════════════ -->
+<div id="login-page">
+  <div class="auth-box">
+    <div class="auth-icon">🔍</div>
+    <h1>Secret Scanner</h1>
+    <p class="auth-tagline">Security vulnerability detection dashboard</p>
+    <div id="auth-msg" class="auth-msg" style="display:none"></div>
+
+    <!-- Login -->
+    <div id="login-form">
+      <input id="l-user" type="text"     placeholder="Username"  autocomplete="username" />
+      <input id="l-pass" type="password" placeholder="Password"  autocomplete="current-password" />
+      <button class="btn-submit" id="login-btn" onclick="doLogin()">Sign In</button>
+      <p class="switch-link">No account? <a href="#" onclick="showReg()">Create one</a></p>
+    </div>
+
+    <!-- Register -->
+    <div id="reg-form" style="display:none">
+      <input id="r-user" type="text"     placeholder="Username (letters, numbers, _)" autocomplete="username" />
+      <input id="r-pass" type="password" placeholder="Password (min 6 characters)"    autocomplete="new-password" />
+      <button class="btn-submit" id="reg-btn" onclick="doRegister()">Create Account</button>
+      <p class="switch-link">Already have an account? <a href="#" onclick="showLogin()">Sign in</a></p>
+    </div>
+  </div>
+</div>
+
+<!-- ══ DASHBOARD PAGE ══════════════════════════════════════ -->
+<div id="dash-page" style="display:none">
+
+  <header class="header">
+    <div class="hdr-left">
+      <span class="hdr-logo">🔍</span>
+      <div>
+        <h1>Secret Scanner</h1>
+        <p class="hdr-sub">Security vulnerability tracker</p>
+      </div>
+    </div>
+    <div class="hdr-right">
+      <div class="grade-wrap">
+        <div class="grade-circle" id="grade-el">–</div>
+        <span class="grade-label">Security Grade</span>
+      </div>
+      <div class="user-wrap">
+        <span id="uname-el" class="uname"></span>
+        <button class="btn-signout" onclick="doLogout()">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- ── SCAN BOX ── -->
+    <div class="scan-box">
+      <div class="scan-box-title">🔍 Scan a Project</div>
+      <div class="scan-row">
+        <input
+          id="scan-input"
+          type="text"
+          placeholder="Paste folder path  (e.g. C:\Users\hp\my-project)  or GitHub URL  (e.g. https://github.com/user/repo)"
+        />
+        <button class="btn-scan" id="scan-btn" onclick="doScan()">Scan Now</button>
+      </div>
+      <div class="scan-examples">
+        <span>Examples:</span>
+        <code>C:\Users\hp\my-project</code>
+        <code>./my-project</code>
+        <code>https://github.com/username/repo</code>
+      </div>
+      <div id="scan-result" class="scan-result" style="display:none"></div>
+    </div>
+
+    <!-- ── STATS ── -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-num" id="st-total">0</div>
+        <div class="stat-label">Total Leaks</div>
+      </div>
+      <div class="stat-card critical">
+        <div class="stat-num" id="st-crit">0</div>
+        <div class="stat-label">Critical</div>
+      </div>
+      <div class="stat-card high">
+        <div class="stat-num" id="st-high">0</div>
+        <div class="stat-label">High Risk</div>
+      </div>
+      <div class="stat-card medium">
+        <div class="stat-num" id="st-med">0</div>
+        <div class="stat-label">Medium Risk</div>
+      </div>
+      <div class="stat-card fixed">
+        <div class="stat-num" id="st-fixed">0</div>
+        <div class="stat-label">Fixed</div>
+      </div>
+      <div class="stat-card pending">
+        <div class="stat-num" id="st-pend">0</div>
+        <div class="stat-label">Pending</div>
+      </div>
+    </div>
+
+    <!-- ── FILTER BAR ── -->
+    <div class="filter-bar">
+      <span class="filter-title">Filter:</span>
+      <button class="fbtn on"  data-f="all"      onclick="setFilter(this)">All</button>
+      <button class="fbtn"     data-f="critical"  onclick="setFilter(this)">Critical</button>
+      <button class="fbtn"     data-f="high"      onclick="setFilter(this)">High</button>
+      <button class="fbtn"     data-f="medium"    onclick="setFilter(this)">Medium</button>
+      <button class="fbtn"     data-f="pending"   onclick="setFilter(this)">Pending</button>
+      <button class="fbtn"     data-f="fixed"     onclick="setFilter(this)">Fixed</button>
+      <button class="fbtn"     data-f="ignored"   onclick="setFilter(this)">Ignored</button>
+      <button class="fbtn green" onclick="loadDash()">⟳ Refresh</button>
+      <button class="fbtn red"   onclick="clearAll()">🗑 Clear All</button>
+    </div>
+
+    <!-- ── LEAKS LIST ── -->
+    <div id="empty-msg" class="empty-msg">
+      <div class="empty-icon">🔒</div>
+      <p>No results yet.</p>
+      <p>Paste a folder path or GitHub URL above and click <strong>Scan Now</strong>.</p>
+    </div>
+    <div id="leaks-list"></div>
+
+  </main>
+</div>
+
+<!-- ══ FIX GUIDE MODAL ══════════════════════════════════════ -->
+<div id="modal-bg" class="modal-bg" style="display:none" onclick="bgClose(event)">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal()">×</button>
+    <div id="m-badge"></div>
+    <h2 id="m-title"></h2>
+    <p  id="m-what" class="m-what"></p>
+    <h3 class="m-steps-title">Step-by-step fix</h3>
+    <ol id="m-steps"></ol>
+    <div id="m-meta" class="m-meta"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
