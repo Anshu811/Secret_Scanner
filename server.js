@@ -7,19 +7,54 @@ const crypto    = require('crypto');
 const os        = require('os');
 const { execSync } = require('child_process');
 const mongoose  = require('mongoose');
+const cors      = require('cors');          // ✅ ADDED CORS
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
 // ══════════════════════════════════════════════════════════════
+//  CORS CONFIGURATION (so others can use your deployed app)
+// ══════════════════════════════════════════════════════════════
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5000',
+  process.env.RENDER_EXTERNAL_URL,   // automatically set by Render
+  process.env.FRONTEND_URL,          // optional: if you set a custom one
+].filter(Boolean);                   // remove undefined values
+
+app.use(cors({
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin) || origin.endsWith('.onrender.com')) {
+      callback(null, true);
+    } else {
+      console.log('Blocked by CORS:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));
+
+// ══════════════════════════════════════════════════════════════
 //  MONGODB CONNECTION
 // ══════════════════════════════════════════════════════════════
-mongoose.connect(process.env.MONGO_URI)
+const mongoURI = process.env.MONGO_URI;
+if (!mongoURI) {
+  console.error('  ❌  Missing MONGO_URI in environment variables');
+  process.exit(1);
+}
+// Warn if unsupported query parameters are present (e.g., ?Scann=...)
+if (mongoURI.includes('?') && mongoURI.match(/\?(.*=.*)/) && !mongoURI.includes('retryWrites')) {
+  console.warn('  ⚠️  Your MONGO_URI contains unsupported parameters (like ?Scann=...). Remove them for a stable connection.');
+}
+
+mongoose.connect(mongoURI)
   .then(() => console.log('  ✅  MongoDB Connected'))
   .catch(err => { console.error('  ❌  MongoDB Error:', err.message); process.exit(1); });
 
 // ══════════════════════════════════════════════════════════════
-//  MONGOOSE SCHEMAS
+//  MONGOOSE SCHEMAS (unchanged)
 // ══════════════════════════════════════════════════════════════
 const userSchema = new mongoose.Schema({
   id:        String,
@@ -68,7 +103,7 @@ function auth(req, res, next) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  SCANNER CORE  (same patterns as scan.js)
+//  SCANNER CORE (same as before)
 // ══════════════════════════════════════════════════════════════
 const PATTERNS = [
   { name: 'AWS Access Key',      severity: 'critical', regex: /AKIA[0-9A-Z]{16}/g },
@@ -175,7 +210,7 @@ function scanDirectory(dirPath) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  AUTH ROUTES
+//  AUTH ROUTES (unchanged)
 // ══════════════════════════════════════════════════════════════
 app.post('/api/register', async (req, res) => {
   const { username, password } = req.body || {};
@@ -235,7 +270,7 @@ app.post('/api/logout', auth, (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  SCAN ROUTE  — folder path OR github url
+//  SCAN ROUTE (unchanged)
 // ══════════════════════════════════════════════════════════════
 app.post('/api/scan', auth, async (req, res) => {
   const { target } = req.body || {};
@@ -247,7 +282,6 @@ app.post('/api/scan', auth, async (req, res) => {
   let   tempDir   = null;
   let   isGitHub  = false;
 
-  // ── GitHub URL ─────────────────────────────────────────────
   if (t.startsWith('https://github.com') || t.startsWith('http://github.com') || t.includes('github.com/')) {
     isGitHub = true;
 
@@ -264,7 +298,6 @@ app.post('/api/scan', auth, async (req, res) => {
       return res.status(400).json({ error: 'Could not clone repository. Make sure the URL is correct and the repo is public.' });
     }
 
-  // ── Local folder path ──────────────────────────────────────
   } else {
     scanPath = path.resolve(t);
     if (!fs.existsSync(scanPath))
@@ -273,7 +306,6 @@ app.post('/api/scan', auth, async (req, res) => {
       return res.status(400).json({ error: `That path is a file, not a folder: ${scanPath}` });
   }
 
-  // ── Run scanner ────────────────────────────────────────────
   let results = [];
   try {
     results = scanDirectory(scanPath);
@@ -283,7 +315,6 @@ app.post('/api/scan', auth, async (req, res) => {
     }
   }
 
-  // Merge into MongoDB (skip exact duplicates)
   try {
     let added = 0;
     for (const r of results) {
@@ -314,7 +345,7 @@ app.post('/api/scan', auth, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  LEAK ROUTES
+//  LEAK ROUTES (unchanged)
 // ══════════════════════════════════════════════════════════════
 app.get('/api/leaks', auth, async (req, res) => {
   try {
@@ -387,9 +418,9 @@ app.delete('/api/leaks/clear', auth, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  START
+//  START SERVER (bind to 0.0.0.0 for Render)
 // ══════════════════════════════════════════════════════════════
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log('\n  ┌───────────────────────────────────────────┐');
   console.log('  │        SECRET SCANNER DASHBOARD           │');
   console.log('  ├───────────────────────────────────────────┤');
