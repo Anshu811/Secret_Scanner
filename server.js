@@ -1,40 +1,20 @@
 require('dotenv').config();
 
-const express   = require('express');
-const fs        = require('fs');
-const path      = require('path');
-const crypto    = require('crypto');
-const os        = require('os');
+const express      = require('express');
+const fs           = require('fs');
+const path         = require('path');
+const crypto       = require('crypto');
+const os           = require('os');
 const { execSync } = require('child_process');
-const mongoose  = require('mongoose');
-const cors      = require('cors');          // ✅ ADDED CORS
+const mongoose     = require('mongoose');
+const jwt          = require('jsonwebtoken');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_change_this';
 
-// ══════════════════════════════════════════════════════════════
-//  CORS CONFIGURATION (so others can use your deployed app)
-// ══════════════════════════════════════════════════════════════
-const allowedOrigins = [
-  'http://localhost:3000',
-  'http://localhost:5000',
-  process.env.RENDER_EXTERNAL_URL,   // automatically set by Render
-  process.env.FRONTEND_URL,          // optional: if you set a custom one
-].filter(Boolean);                   // remove undefined values
-
-app.use(cors({
-  origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, etc.)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin) || origin.endsWith('.onrender.com')) {
-      callback(null, true);
-    } else {
-      console.log('Blocked by CORS:', origin);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-}));
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ══════════════════════════════════════════════════════════════
 //  MONGODB CONNECTION
@@ -44,28 +24,24 @@ if (!mongoURI) {
   console.error('  ❌  Missing MONGO_URI in environment variables');
   process.exit(1);
 }
-// Warn if unsupported query parameters are present (e.g., ?Scann=...)
-if (mongoURI.includes('?') && mongoURI.match(/\?(.*=.*)/) && !mongoURI.includes('retryWrites')) {
-  console.warn('  ⚠️  Your MONGO_URI contains unsupported parameters (like ?Scann=...). Remove them for a stable connection.');
-}
 
 mongoose.connect(mongoURI)
   .then(() => console.log('  ✅  MongoDB Connected'))
   .catch(err => { console.error('  ❌  MongoDB Error:', err.message); process.exit(1); });
 
 // ══════════════════════════════════════════════════════════════
-//  MONGOOSE SCHEMAS (unchanged)
+//  MONGOOSE SCHEMAS
 // ══════════════════════════════════════════════════════════════
 const userSchema = new mongoose.Schema({
-  id:        String,
-  username:  { type: String, unique: true },
-  password:  String,
-  createdAt: String,
+  uid:       { type: String, required: true },
+  username:  { type: String, unique: true, required: true },
+  password:  { type: String, required: true },
+  createdAt: { type: String },
 });
 const User = mongoose.model('User', userSchema);
 
 const leakSchema = new mongoose.Schema({
-  id:         String,
+  lid:        { type: String, required: true, unique: true },
   file:       String,
   line:       Number,
   type:       String,
@@ -81,29 +57,34 @@ const leakSchema = new mongoose.Schema({
 });
 const Leak = mongoose.model('Leak', leakSchema);
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
 // ══════════════════════════════════════════════════════════════
-//  SESSION STORE
+//  AUTH HELPERS  — JWT based (works across multiple servers)
 // ══════════════════════════════════════════════════════════════
-const sessions = {};
-
 function hashPw(pw) {
   return crypto.createHash('sha256').update('ss2024salt:' + pw).digest('hex');
 }
-function newToken() {
-  return crypto.randomBytes(32).toString('hex');
+
+function makeJWT(user) {
+  return jwt.sign(
+    { id: user.uid, username: user.username },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
 }
+
 function auth(req, res, next) {
-  const t = req.headers['x-auth-token'];
-  if (!t || !sessions[t]) return res.status(401).json({ error: 'Not logged in.' });
-  req.user = sessions[t];
-  next();
+  const token = req.headers['x-auth-token'];
+  if (!token) return res.status(401).json({ error: 'Not logged in.' });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Session expired. Please log in again.' });
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
-//  SCANNER CORE (same as before)
+//  SCANNER PATTERNS
 // ══════════════════════════════════════════════════════════════
 const PATTERNS = [
   { name: 'AWS Access Key',      severity: 'critical', regex: /AKIA[0-9A-Z]{16}/g },
@@ -139,7 +120,7 @@ const PATTERNS = [
 ];
 
 const FIX_GUIDES = {
-  'AWS Access Key':     { what: 'Amazon AWS credential. Anyone with this key can access your AWS account, create resources and run huge bills.', steps: ['Go to https://console.aws.amazon.com/iam', 'Click your username → Security credentials', 'Find the exposed key → Deactivate → Delete', 'Create a new access key', 'Add to .env:  AWS_ACCESS_KEY_ID=your_new_key', 'Use in code:  process.env.AWS_ACCESS_KEY_ID'] },
+  'AWS Access Key':     { what: 'Amazon AWS credential. Anyone with this key can access your AWS account and run up huge bills.', steps: ['Go to https://console.aws.amazon.com/iam', 'Click your username → Security credentials', 'Find the exposed key → Deactivate → Delete', 'Create a new access key', 'Add to .env:  AWS_ACCESS_KEY_ID=your_new_key', 'Use in code:  process.env.AWS_ACCESS_KEY_ID'] },
   'GitHub Token':       { what: 'GitHub Personal Access Token. Attacker can read/write all your repositories including private ones.', steps: ['Go to https://github.com/settings/tokens', 'Find and delete the exposed token', 'Generate new token with minimum required permissions', 'Add to .env:  GITHUB_TOKEN=your_new_token', 'Use in code:  process.env.GITHUB_TOKEN'] },
   'OpenAI API Key':     { what: 'OpenAI API key. Attacker can use your quota and run up large billing charges.', steps: ['Go to https://platform.openai.com/api-keys', 'Delete the exposed key', 'Create a new secret key', 'Add to .env:  OPENAI_API_KEY=your_new_key', 'Use in code:  process.env.OPENAI_API_KEY'] },
   'MongoDB URI':        { what: 'MongoDB connection string. Attacker can read, modify or delete your entire database.', steps: ['Log in to https://cloud.mongodb.com', 'Go to Database Access → Edit the user', 'Change the password immediately', 'Update .env:  MONGODB_URI=new_uri', 'Use in code:  process.env.MONGODB_URI'] },
@@ -155,8 +136,33 @@ function getFixGuide(name) {
   };
 }
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'out', 'coverage', 'vendor', '__pycache__', '.idea', '.vscode', 'tmp', 'temp', 'logs']);
-const SKIP_EXTS = new Set(['.png','.jpg','.jpeg','.gif','.svg','.ico','.webp','.woff','.woff2','.ttf','.eot','.mp4','.mp3','.zip','.tar','.gz','.pdf','.lock','.bin','.exe','.dll','.map']);
+// ══════════════════════════════════════════════════════════════
+//  SCANNER CORE
+// ══════════════════════════════════════════════════════════════
+const SKIP_DIRS = new Set([
+  'node_modules', '.git', 'dist', 'build', '.next', 'out',
+  'coverage', 'vendor', '__pycache__', '.idea', '.vscode',
+  'tmp', 'temp', 'logs', '.cache',
+]);
+
+const SKIP_EXTS = new Set([
+  '.png','.jpg','.jpeg','.gif','.svg','.ico','.webp',
+  '.woff','.woff2','.ttf','.eot','.mp4','.mp3','.wav',
+  '.zip','.tar','.gz','.rar','.pdf','.lock','.bin',
+  '.exe','.dll','.map',
+]);
+
+// These specific filenames are always skipped — lock files, scanner's own data files
+const SKIP_FILES = new Set([
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'results.json',
+  'users.json',
+  '.env',
+  '.env.local',
+  '.env.production',
+]);
 
 function scanFile(filePath) {
   const results = [];
@@ -175,7 +181,7 @@ function scanFile(filePath) {
       const lineNum = content.substring(0, m.index).split('\n').length;
       const fix = getFixGuide(p.name);
       results.push({
-        id:         crypto.randomBytes(8).toString('hex'),
+        lid:        crypto.randomBytes(8).toString('hex'),
         file:       filePath,
         line:       lineNum,
         type:       p.name,
@@ -199,6 +205,7 @@ function scanDirectory(dirPath) {
     try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
       if (SKIP_DIRS.has(e.name)) continue;
+      if (SKIP_FILES.has(e.name)) continue;          // ← skip lock files & data files
       const full = path.join(cur, e.name);
       if (e.isDirectory()) { walk(full); continue; }
       if (SKIP_EXTS.has(path.extname(e.name).toLowerCase())) continue;
@@ -210,7 +217,7 @@ function scanDirectory(dirPath) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  AUTH ROUTES (unchanged)
+//  AUTH ROUTES
 // ══════════════════════════════════════════════════════════════
 app.post('/api/register', async (req, res) => {
   const { username, password } = req.body || {};
@@ -231,7 +238,7 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'Username already taken. Please choose another.' });
 
     await User.create({
-      id:        crypto.randomBytes(8).toString('hex'),
+      uid:       crypto.randomBytes(8).toString('hex'),
       username:  username.trim(),
       password:  hashPw(password),
       createdAt: new Date().toISOString(),
@@ -255,8 +262,7 @@ app.post('/api/login', async (req, res) => {
     });
     if (!user) return res.status(401).json({ error: 'Incorrect username or password.' });
 
-    const token = newToken();
-    sessions[token] = { id: user.id, username: user.username };
+    const token = makeJWT(user);
     res.json({ success: true, token, username: user.username });
   } catch (err) {
     console.error(err);
@@ -265,12 +271,12 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.post('/api/logout', auth, (req, res) => {
-  delete sessions[req.headers['x-auth-token']];
+  // JWT is stateless — client just deletes the token
   res.json({ success: true });
 });
 
 // ══════════════════════════════════════════════════════════════
-//  SCAN ROUTE (unchanged)
+//  SCAN ROUTE
 // ══════════════════════════════════════════════════════════════
 app.post('/api/scan', auth, async (req, res) => {
   const { target } = req.body || {};
@@ -278,15 +284,14 @@ app.post('/api/scan', auth, async (req, res) => {
     return res.status(400).json({ error: 'Please provide a folder path or GitHub URL.' });
 
   const t = target.trim();
-  let   scanPath  = null;
-  let   tempDir   = null;
-  let   isGitHub  = false;
+  let scanPath = null;
+  let tempDir  = null;
+  let isGitHub = false;
 
-  if (t.startsWith('https://github.com') || t.startsWith('http://github.com') || t.includes('github.com/')) {
+  if (t.includes('github.com/')) {
     isGitHub = true;
-
     try { execSync('git --version', { stdio: 'ignore' }); }
-    catch { return res.status(500).json({ error: 'Git is not installed. Please install Git from https://git-scm.com and try again.' }); }
+    catch { return res.status(500).json({ error: 'Git is not installed on this server.' }); }
 
     tempDir  = fs.mkdtempSync(path.join(os.tmpdir(), 'ss-'));
     scanPath = tempDir;
@@ -297,22 +302,19 @@ app.post('/api/scan', auth, async (req, res) => {
       try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
       return res.status(400).json({ error: 'Could not clone repository. Make sure the URL is correct and the repo is public.' });
     }
-
   } else {
     scanPath = path.resolve(t);
     if (!fs.existsSync(scanPath))
       return res.status(404).json({ error: `Folder not found: ${scanPath}` });
     if (!fs.statSync(scanPath).isDirectory())
-      return res.status(400).json({ error: `That path is a file, not a folder: ${scanPath}` });
+      return res.status(400).json({ error: `That path is a file, not a folder.` });
   }
 
   let results = [];
   try {
     results = scanDirectory(scanPath);
   } finally {
-    if (tempDir) {
-      try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
-    }
+    if (tempDir) { try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {} }
   }
 
   try {
@@ -327,14 +329,12 @@ app.post('/api/scan', auth, async (req, res) => {
     const medium   = results.filter(r => r.severity === 'medium').length;
 
     res.json({
-      success:  true,
-      total:    results.length,
+      success: true,
+      total:   results.length,
       added,
-      critical,
-      high,
-      medium,
-      source:   isGitHub ? 'github' : 'local',
-      message:  results.length === 0
+      critical, high, medium,
+      source:  isGitHub ? 'github' : 'local',
+      message: results.length === 0
         ? 'No secrets found! Your project looks clean.'
         : `Found ${results.length} secret(s) — ${critical} critical, ${high} high, ${medium} medium. ${added} new added to dashboard.`,
     });
@@ -345,20 +345,20 @@ app.post('/api/scan', auth, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════
-//  LEAK ROUTES (unchanged)
+//  LEAK ROUTES
 // ══════════════════════════════════════════════════════════════
 app.get('/api/leaks', auth, async (req, res) => {
   try {
-    const leaks = await Leak.find();
+    const raw   = await Leak.find().lean();
+    // Rename lid → id for frontend compatibility
+    const leaks = raw.map(l => ({ ...l, id: l.lid }));
     res.json({ leaks });
-  } catch (err) {
-    res.status(500).json({ error: 'Could not fetch leaks.' });
-  }
+  } catch { res.status(500).json({ error: 'Could not fetch leaks.' }); }
 });
 
 app.get('/api/stats', auth, async (req, res) => {
   try {
-    const leaks    = await Leak.find();
+    const leaks    = await Leak.find().lean();
     const total    = leaks.length;
     const fixed    = leaks.filter(l => l.status === 'fixed').length;
     const ignored  = leaks.filter(l => l.status === 'ignored').length;
@@ -375,50 +375,41 @@ app.get('/api/stats', auth, async (req, res) => {
     else if (medium   >= 3) grade = 'B';
 
     res.json({ total, fixed, ignored, pending, critical, high, medium, grade });
-  } catch (err) {
-    res.status(500).json({ error: 'Could not fetch stats.' });
-  }
+  } catch { res.status(500).json({ error: 'Could not fetch stats.' }); }
 });
 
 app.patch('/api/leak/:id', auth, async (req, res) => {
   const { status } = req.body || {};
   if (!['fixed', 'ignored', 'pending'].includes(status))
     return res.status(400).json({ error: 'status must be: fixed | ignored | pending' });
-
   try {
-    const leak = await Leak.findOne({ id: req.params.id });
+    const leak = await Leak.findOne({ lid: req.params.id });
     if (!leak) return res.status(404).json({ error: 'Leak not found.' });
     leak.status    = status;
     leak.updatedAt = new Date().toISOString();
     leak.updatedBy = req.user.username;
     await leak.save();
-    res.json({ success: true, leak });
-  } catch (err) {
-    res.status(500).json({ error: 'Could not update leak.' });
-  }
+    res.json({ success: true, leak: { ...leak.toObject(), id: leak.lid } });
+  } catch { res.status(500).json({ error: 'Could not update leak.' }); }
 });
 
 app.delete('/api/leak/:id', auth, async (req, res) => {
   try {
-    const result = await Leak.deleteOne({ id: req.params.id });
+    const result = await Leak.deleteOne({ lid: req.params.id });
     if (result.deletedCount === 0) return res.status(404).json({ error: 'Leak not found.' });
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Could not delete leak.' });
-  }
+  } catch { res.status(500).json({ error: 'Could not delete leak.' }); }
 });
 
 app.delete('/api/leaks/clear', auth, async (req, res) => {
   try {
     await Leak.deleteMany({});
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Could not clear leaks.' });
-  }
+  } catch { res.status(500).json({ error: 'Could not clear leaks.' }); }
 });
 
 // ══════════════════════════════════════════════════════════════
-//  START SERVER (bind to 0.0.0.0 for Render)
+//  START
 // ══════════════════════════════════════════════════════════════
 app.listen(PORT, '0.0.0.0', () => {
   console.log('\n  ┌───────────────────────────────────────────┐');
